@@ -481,10 +481,16 @@ class HybridEngine:
         n_search_cells: int = 3,
         seed: int = 42,
     ) -> "HybridEngine":
-        """Build engine from Atlas teacher coordinate file."""
+        """
+        Build engine from Atlas teacher coordinate file.
+
+        Uses domain-constrained tessellation: K-means runs WITHIN each domain
+        independently, guaranteeing 100% domain-pure cells. Cell budget is
+        allocated proportionally to domain size (minimum 3 per domain).
+        """
         from sklearn.cluster import MiniBatchKMeans
 
-        log.info(f"Building HybridEngine: K={K}, n_search_cells={n_search_cells}")
+        log.info(f"Building HybridEngine: K={K}, n_search_cells={n_search_cells}, domain-constrained")
         tc = np.load(teacher_path, allow_pickle=False)
         tangents = tc["coords"].astype(np.float32)
         domains = tc["domain_labels"].astype(np.int32)
@@ -494,48 +500,54 @@ class HybridEngine:
 
         N, D = tangents.shape
 
-        km = MiniBatchKMeans(n_clusters=K, random_state=seed,
-                             batch_size=min(4096, N), n_init=3, max_iter=100)
-        km.fit(tangents)
-        centers = km.cluster_centers_.astype(np.float32)
-        assignments = km.labels_.astype(np.int32)
+        # Allocate cells proportionally to domain size (min 3 each)
+        domain_sizes = {d: int((domains == d).sum()) for d in range(3)}
+        total_g = sum(domain_sizes.values())
+        K_per = {d: max(3, round(K * domain_sizes[d] / total_g)) for d in range(3)}
+        while sum(K_per.values()) > K:
+            K_per[max(K_per, key=K_per.get)] -= 1
+        while sum(K_per.values()) < K:
+            K_per[max(K_per, key=lambda d: domain_sizes[d] / K_per[d])] += 1
 
+        for d in range(3):
+            log.info(f"  {DOMAIN_NAMES[d]}: {domain_sizes[d]} genomes -> {K_per[d]} cells")
+
+        # K-means within each domain
+        all_centers = []
         cells = []
-        for k in range(K):
-            mask = assignments == k
-            member_idx = np.where(mask)[0]
-            n_members = len(member_idx)
+        assignments = np.zeros(N, dtype=np.int32)
+        offset = 0
 
-            if n_members == 0:
+        for d in range(3):
+            d_idx = np.where(domains == d)[0]
+            km = MiniBatchKMeans(
+                n_clusters=K_per[d], random_state=seed,
+                batch_size=min(4096, len(d_idx)), n_init=3, max_iter=100,
+            )
+            km.fit(tangents[d_idx])
+
+            for k in range(K_per[d]):
+                members = d_idx[km.labels_ == k]
+                gid = offset + k
+                assignments[members] = gid
+
+                fam_c = np.bincount(families[members], minlength=len(family_names))
+                fi = fam_c.argmax()
                 cells.append(CellMeta(
-                    cell_id=k, n_members=0,
-                    dominant_domain="Unknown", dominant_family="Unknown",
-                    domain_purity=0.0, family_purity=0.0,
-                    mean_radius=0.0, member_indices=member_idx,
+                    cell_id=gid, n_members=len(members),
+                    dominant_domain=DOMAIN_NAMES[d],
+                    dominant_family=str(family_names[fi]) if fi < len(family_names) else "Unknown",
+                    domain_purity=1.0,
+                    family_purity=float(fam_c[fi] / len(members)),
+                    mean_radius=float(np.linalg.norm(tangents[members], axis=1).mean()),
+                    member_indices=members,
                 ))
-                continue
 
-            cell_doms = domains[mask]
-            dom_counts = np.bincount(cell_doms, minlength=3)
-            dom_idx = dom_counts.argmax()
+            all_centers.append(km.cluster_centers_)
+            offset += K_per[d]
 
-            cell_fams = families[mask]
-            fam_counts = np.bincount(cell_fams, minlength=len(family_names))
-            fam_idx = fam_counts.argmax()
-            fam_name = str(family_names[fam_idx]) if fam_idx < len(family_names) else "Unknown"
-
-            cells.append(CellMeta(
-                cell_id=k, n_members=n_members,
-                dominant_domain=DOMAIN_NAMES.get(int(dom_idx), "Unknown"),
-                dominant_family=fam_name,
-                domain_purity=float(dom_counts[dom_idx] / n_members),
-                family_purity=float(fam_counts[fam_idx] / n_members),
-                mean_radius=float(np.linalg.norm(tangents[mask], axis=1).mean()),
-                member_indices=member_idx,
-            ))
-
-        dom_pure = sum(1 for c in cells if c.domain_purity > 0.9)
-        log.info(f"  {N} references, {K} cells, {dom_pure} domain-pure (>90%)")
+        centers = np.concatenate(all_centers).astype(np.float32)
+        log.info(f"  {N} references, {K} cells, ALL domain-pure (constrained)")
 
         return cls(
             centers=centers, cells=cells,
