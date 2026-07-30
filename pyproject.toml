@@ -1,11 +1,11 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "canonical-coordinate-system"
-version = "3.0.0"
-description = "Tangent-space Voronoi tessellation for the Biosphere Atlas canonical coordinate system"
+version = "4.0.0"
+description = "A reference coordinate datum for the tree of life (frozen frame + registration) with an operational retrieval engine"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
@@ -40,4 +40,4 @@ Repository = "https://github.com/sentry-bio/canonical-coordinate-system"
 Documentation = "https://biosphereatlas.com/docs/ccs"
 
 [tool.setuptools.packages.find]
-include = ["canonical_hybrid*"]
+include = ["canonical_datum*", "canonical_hybrid*"]
